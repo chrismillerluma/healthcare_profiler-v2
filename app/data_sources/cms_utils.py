@@ -2,15 +2,31 @@ import os
 import io
 import pandas as pd
 import requests
-from config import settings
 import streamlit as st
+from config import settings
 
 # -------------------------
 # Load CMS General Info
 # -------------------------
 @st.cache_data
-def load_cms_general_info():
+def load_cms_general_info(csv_path=None):
+    """
+    Load CMS general info from URL or backup.
+    If csv_path is provided, load from local CSV instead.
+    """
     backup_path = os.path.join(settings.DATA_DIR, "cms_hospitals_backup.csv")
+
+    # Use CSV path if provided
+    if csv_path is not None:
+        try:
+            df = pd.read_csv(csv_path, dtype=str, on_bad_lines="skip")
+            st.success(f"Loaded CMS general info from CSV path ({len(df)} records)")
+            return df
+        except Exception as e:
+            st.error(f"Cannot load CMS general info from {csv_path}: {e}")
+            return pd.DataFrame()
+
+    # Otherwise try URL
     try:
         r = requests.get(settings.CMS_GENERAL_URL, timeout=15)
         df = pd.read_csv(io.BytesIO(r.content), dtype=str, on_bad_lines="skip")
@@ -32,8 +48,22 @@ def load_cms_general_info():
 # Load CMS Patient Survey Data
 # -------------------------
 @st.cache_data
-def load_cms_patient_surveys():
+def load_cms_patient_surveys(csv_path=None):
+    """
+    Load CMS patient surveys from URL or backup.
+    If csv_path is provided, load from local CSV instead.
+    """
     backup_path = os.path.join(settings.DATA_DIR, "cms_patient_surveys_backup.csv")
+
+    if csv_path is not None:
+        try:
+            df = pd.read_csv(csv_path, dtype=str, on_bad_lines="skip")
+            st.success(f"Loaded CMS patient surveys from CSV path ({len(df)} records)")
+            return df
+        except Exception as e:
+            st.error(f"Cannot load CMS patient surveys from {csv_path}: {e}")
+            return pd.DataFrame()
+
     try:
         r = requests.get(settings.CMS_SURVEY_URL, timeout=15)
         df = pd.read_csv(io.BytesIO(r.content), dtype=str, on_bad_lines="skip")
@@ -52,7 +82,7 @@ def load_cms_patient_surveys():
         return pd.DataFrame()
 
 # -------------------------
-# Example metric extraction
+# Extract Patient Survey Metrics
 # -------------------------
 def get_patient_survey_metrics(df_survey, hospital_name):
     """Return dictionary of key patient survey scores for a hospital"""
@@ -70,7 +100,7 @@ def get_patient_survey_metrics(df_survey, hospital_name):
         "Pain_Management": row.get("Pain_Management"),
     }
     return metrics
-    
+
 # -------------------------
 # Calculate CMS Score
 # -------------------------
@@ -82,7 +112,6 @@ def calculate_cms_score(hospital_row):
     if hospital_row is None or hospital_row.empty:
         return None
 
-    # Example: average a few numeric fields if they exist
     try:
         scores = []
         for col in ["HCAHPS_Overall_Rating", "Communication_Doctors", 
@@ -98,3 +127,25 @@ def calculate_cms_score(hospital_row):
         return None
     except Exception:
         return None
+
+# -------------------------
+# Utility: Find CCN Column
+# -------------------------
+def find_ccn_column(df):
+    """
+    Identify which column in CMS dataframe contains the CCN (CMS Certification Number)
+    """
+    for col in df.columns:
+        if "CCN" in col.upper() or "CMS Certification Number".upper() in col.upper():
+            return col
+    return None
+
+# -------------------------
+# Placeholder: Fetch HCAHPS by CCN
+# -------------------------
+def fetch_hcahps_by_ccn(ccn):
+    """
+    Fetch CMS HCAHPS patient survey data for a given CCN
+    Placeholder: return empty DataFrame or implement API call
+    """
+    return pd.DataFrame()
