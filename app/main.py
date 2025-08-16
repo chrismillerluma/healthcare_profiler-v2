@@ -5,11 +5,13 @@ import json
 import re
 from datetime import datetime, timezone
 import asyncio
+
 import pandas as pd
 import streamlit as st
 import aiohttp
 from aiolimiter import AsyncLimiter
 import nest_asyncio
+from bs4 import BeautifulSoup
 
 # Add parent folder to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -18,21 +20,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from config import settings
 from data_sources.google_utils import google_search_name, match_org, normalize_name
 from data_sources.cms_utils import load_cms_general_info, calculate_cms_score
-from data_sources.news_utils import fetch_news
 from data_sources.website_scraper import scrape_about
-from data_sources.usnews import fetch_usnews_rankings
-from data_sources.yelp_utils import fetch_yelp_reviews_scrape, fetch_yelp_reviews_api, fetch_yelp_reviews_scrape_url
+from data_sources.yelp_utils import fetch_yelp_reviews_scrape_url
 from export_utils import export_to_excel
-from yelp_playwright import fetch_yelp_reviews_scroll  # existing sync function
-
-# Async wrapper
-async def fetch_yelp_reviews_scroll_async(url, limit=10):
-    return await asyncio.to_thread(fetch_yelp_reviews_scroll, url, limit)
 
 # Load environment variables
 load_dotenv()
 google_api_key = os.getenv("GOOGLE_API_KEY", "")
-yelp_api_key = os.getenv("YELP_API_KEY", "")
 default_location = os.getenv("DEFAULT_YELP_LOCATION", "San Francisco, CA")
 
 # Streamlit page config
@@ -43,12 +37,10 @@ st.set_page_config(
 st.title("Healthcare Organization Discovery Profiler — v2.0")
 
 # Input API keys and location
-col1, col2, col3 = st.columns([1, 1, 1])
+col1, col2 = st.columns([1,1])
 with col1:
     gkey = st.text_input("Google Places API Key (optional)", value=google_api_key, type="password")
 with col2:
-    yelp_key = st.text_input("Yelp API Key (optional)", value=yelp_api_key, type="password")
-with col3:
     default_loc = st.text_input("Default Location for Yelp (city, state)", value=default_location)
 
 # Cache CMS data
@@ -64,7 +56,6 @@ search_button = st.button("Search")
 
 # --- Async Limiters ---
 google_limiter = AsyncLimiter(max_rate=5, time_period=1)
-yelp_limiter = AsyncLimiter(max_rate=5, time_period=1)
 
 # --- Async fetch wrappers ---
 async def limited_google_search(query, api_key):
@@ -85,43 +76,6 @@ async def limited_google_details(place_id, api_key):
             )
             async with session.get(url, timeout=10) as resp:
                 return await resp.json()
-
-async def limited_yelp_search(name, location, api_key):
-    async with yelp_limiter:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            url = f"https://api.yelp.com/v3/businesses/search?term={name}&location={location}"
-            async with session.get(url, timeout=10) as resp:
-                return await resp.json()
-
-# --- Safe wrappers for sync fetches ---
-def safe_fetch_yelp_reviews_api(name, city, api_key):
-    try:
-        return fetch_yelp_reviews_api(name, city, api_key)
-    except Exception as e:
-        st.warning(f"[Yelp API Error] {e}")
-        return []
-
-def safe_fetch_yelp_reviews_scrape(name, city):
-    try:
-        return fetch_yelp_reviews_scrape(name, city)
-    except Exception as e:
-        st.warning(f"[Yelp Scrape Error] {e}")
-        return []
-
-def safe_fetch_yelp_reviews_scrape_url(url):
-    try:
-        return fetch_yelp_reviews_scrape_url(url)
-    except Exception as e:
-        st.warning(f"[Yelp Manual URL Error] {e}")
-        return []
-
-def safe_scrape_about(url):
-    try:
-        return scrape_about(url)
-    except Exception as e:
-        st.warning(f"[Website About Error] {e}")
-        return {}
 
 # Streamlit-friendly async
 nest_asyncio.apply()
@@ -159,19 +113,16 @@ if org_input and search_button:
     st.subheader("Facility Info (CMS)")
     st.json(match.to_dict())
 
-    # Normalize org name and location for APIs
+    # Normalize org name and location for Google API
     org_name_for_api = normalize_name(match.get("Hospital Name") or org_input)
     cms_city = match.get("City") or city or "San Francisco"
 
-    st.write(f"Fetching data for: {org_name_for_api}, {cms_city}")
+    st.write(f"Fetching Google Business Profile for: {org_name_for_api}, {cms_city}")
 
-    # --- Async fetch Google & Yelp ---
-    async def fetch_all_reviews_and_profile(org_name, cms_city):
+    # --- Async fetch Google ---
+    async def fetch_google_profile(org_name):
         google_reviews = []
         place_info = {}
-        yelp_reviews = []
-
-        # Google Places
         if gkey:
             search_data = await limited_google_search(org_name, gkey)
             results = search_data.get("results", [])
@@ -191,33 +142,12 @@ if org_input and search_button:
                             "review_text": r.get("text"),
                             "time": datetime.fromtimestamp(r.get("time"), tz=timezone.utc).isoformat() if r.get("time") else None
                         })
+        return google_reviews, place_info
 
-        # Yelp
-        if yelp_key:
-            try:
-                yelp_data = await limited_yelp_search(org_name, cms_city, yelp_key)
-                if yelp_data.get("businesses"):
-                    yelp_reviews = safe_fetch_yelp_reviews_api(org_name, cms_city, yelp_key)
-                else:
-                    yelp_reviews = safe_fetch_yelp_reviews_scrape(org_name, cms_city)
-            except Exception as e:
-                st.warning(f"[Yelp Search Error] {e}")
-                yelp_reviews = []
+    google_reviews, place_info = asyncio.run(fetch_google_profile(org_name_for_api))
 
-        # Fallback to Playwright async if no reviews found
-        if not yelp_reviews:
-            yelp_url = f"https://www.yelp.com/biz/{normalize_name(org_name).replace(' ', '-').lower()}-{cms_city.replace(' ', '-').lower()}"
-            try:
-                yelp_reviews = await fetch_yelp_reviews_scroll_async(yelp_url, limit=10)
-            except Exception as e:
-                st.warning(f"[Playwright Yelp Scroll Error] {e}")
-
-        return google_reviews, place_info, yelp_reviews
-
-    google_reviews, place_info, yelp_reviews = asyncio.run(fetch_all_reviews_and_profile(org_name_for_api, cms_city))
-
-    # --- Display Google Reviews ---
-    st.subheader("Google Reviews (Top 25, worst first if ratings exist)")
+    # 3) Display Google Reviews
+    st.subheader("Google Reviews (Top 25)")
     if google_reviews:
         df_revs = pd.DataFrame(google_reviews)
         expected_cols = ["name","author_name","rating","user_ratings_total","address","review_text","time"]
@@ -226,52 +156,131 @@ if org_input and search_button:
                 df_revs[c] = None
         if "rating" in df_revs.columns and df_revs["rating"].notna().any():
             df_revs["rating"] = pd.to_numeric(df_revs["rating"], errors="coerce")
-            df_revs = df_revs.sort_values("rating")
-        st.dataframe(df_revs.head(25))
+            df_revs = df_revs.sort_values("rating", ascending=True)
+        st.dataframe(df_revs[expected_cols].head(25))
     else:
         st.info("No Google reviews found.")
 
-    # --- Display Yelp Reviews ---
-    st.subheader("Yelp Reviews (Top 25, worst first if ratings exist)")
-    if yelp_reviews:
-        df_yelp = pd.DataFrame(yelp_reviews)
-        if "rating" in df_yelp.columns and df_yelp["rating"].notna().any():
-            df_yelp["rating"] = pd.to_numeric(df_yelp["rating"], errors="coerce")
-            df_yelp = df_yelp.sort_values("rating")
-        st.dataframe(df_yelp.head(25))
-    else:
-        st.info("No Yelp reviews found.")
+    # 4) Google Business Profile
+    st.subheader("Google Business Profile Info")
+    if place_info:
+        st.json({
+            "name": place_info.get("name"),
+            "address": place_info.get("formatted_address"),
+            "rating": place_info.get("rating"),
+            "user_ratings_total": place_info.get("user_ratings_total"),
+            "phone": place_info.get("formatted_phone_number"),
+            "international_phone": place_info.get("international_phone_number"),
+            "website": place_info.get("website"),
+            "opening_hours": place_info.get("opening_hours"),
+            "geometry": place_info.get("geometry"),
+            "types": place_info.get("types"),
+            "place_id": place_info.get("place_id")
+        })
 
-    # --- Manual Yelp URL Input ---
-    st.subheader("Manual Yelp URL Fetch")
-    manual_yelp_url = st.text_input("Enter Yelp URL if automatic fetch fails")
-    if st.button("Fetch Yelp Reviews from URL"):
-        manual_reviews = safe_fetch_yelp_reviews_scrape_url(manual_yelp_url)
-        if manual_reviews:
-            df_manual = pd.DataFrame(manual_reviews)
-            st.dataframe(df_manual.head(25))
-        else:
-            st.info("No reviews could be retrieved from the URL.")
+    # 5) Website About
+    about_data = {}
+    if place_info.get("website"):
+        with st.spinner("Scraping website for About info..."):
+            about_data = scrape_about(place_info.get("website"))
+    if about_data:
+        st.subheader("About (from Website)")
+        st.json(about_data)
 
-    # --- Website / About ---
-    st.subheader("Website / About Information")
-    website_url = place_info.get("website") or match.get("Hospital Website")
-    about_info = safe_scrape_about(website_url) if website_url else {}
-    if about_info:
-        st.json(about_info)
-    else:
-        st.info("No website/about info could be retrieved.")
+    # 6) CMS + Combined Score
+    cms_score = calculate_cms_score(match)
+    google_score = place_info.get("rating") if place_info else None
+    combined_score = None
+    if cms_score and google_score:
+        combined_score = round(0.5*float(google_score) + 0.5*float(cms_score),2)
+    elif cms_score:
+        combined_score = float(cms_score)
+    elif google_score:
+        combined_score = float(google_score)
 
-    # --- Export Button ---
-    output_dir = getattr(settings, "OUTPUT_DIR", "./output")
-    os.makedirs(output_dir, exist_ok=True)
-    if st.button("Export Results"):
-        export_to_excel(
-            org_name=org_input,
-            google_reviews=google_reviews,
-            yelp_reviews=yelp_reviews,
-            cms_info=match.to_dict(),
-            output_dir=output_dir
-        )
-        st.success(f"Results exported to {output_dir}")
+    st.subheader("CMS & Combined Scores")
+    st.write("CMS Score:", cms_score)
+    st.write("Google Rating:", google_score)
+    st.write("Combined Score:", combined_score)
 
+    # 7) Yelp Reviews Manual URL
+    st.subheader("Fetch Yelp Reviews via Manual URL")
+    if "yelp_reviews_manual" not in st.session_state:
+        st.session_state.yelp_reviews_manual = []
+
+    st.session_state.manual_yelp_url = st.text_input("Enter Yelp Business URL (optional)", value="")
+    if st.button("Fetch Yelp Reviews Manually"):
+        if st.session_state.manual_yelp_url:
+            try:
+                st.session_state.yelp_reviews_manual = fetch_yelp_reviews_scrape_url(
+                    st.session_state.manual_yelp_url
+                )
+                st.success(f"Fetched {len(st.session_state.yelp_reviews_manual)} Yelp reviews manually.")
+            except Exception as e:
+                st.error(f"Failed to fetch Yelp reviews: {e}")
+
+    if st.session_state.yelp_reviews_manual:
+        st.subheader("Yelp Reviews (Manual URL)")
+        st.dataframe(pd.DataFrame(st.session_state.yelp_reviews_manual))
+
+# --- 8) OTHER DATA / Manual Paste ---
+st.subheader("Manual Data Entry (US News, Yelp, Other)")
+
+if "manual_data" not in st.session_state:
+    st.session_state.manual_data = {"usnews": {}, "yelp": [], "other": {}}
+
+# --- US News Manual Input (Merged) ---
+usnews_text = st.text_area("Paste US News text/HTML or rank info here", height=150)
+if st.button("Parse US News Data"):
+    if usnews_text:
+        try:
+            soup = BeautifulSoup(usnews_text, "html.parser")
+            rank_tag = soup.find(string=lambda t: t and "rank" in t.lower())
+            st.session_state.manual_data["usnews"] = {
+                "rank_text": rank_tag.strip() if rank_tag else usnews_text.strip(),
+                "raw_html": usnews_text
+            }
+            st.success("US News data parsed and saved.")
+        except Exception as e:
+            st.warning(f"Failed to parse US News: {e}")
+            st.session_state.manual_data["usnews"] = {"raw_html": usnews_text.strip()}
+
+# --- Yelp Manual HTML ---
+yelp_html = st.text_area("Paste Yelp HTML here", height=150)
+if st.button("Parse Yelp Data"):
+    if yelp_html:
+        try:
+            soup = BeautifulSoup(yelp_html, "html.parser")
+            yelp_reviews_parsed = []
+            review_blocks = soup.find_all("div", class_="review")
+            for r in review_blocks:
+                author = r.find("span", class_="fs-block").get_text(strip=True) if r.find("span", class_="fs-block") else None
+                rating = r.find("div", role="img")["aria-label"].split()[0] if r.find("div", role="img") else None
+                text = r.find("p").get_text(strip=True) if r.find("p") else None
+                date = r.find("span", class_="css-e81eai").get_text(strip=True) if r.find("span", class_="css-e81eai") else None
+                yelp_reviews_parsed.append({"author": author, "rating": rating, "text": text, "date": date})
+            st.session_state.manual_data["yelp"] = yelp_reviews_parsed
+            st.success(f"Parsed {len(yelp_reviews_parsed)} Yelp reviews.")
+        except Exception as e:
+            st.warning(f"Failed to parse Yelp HTML: {e}")
+            st.session_state.manual_data["yelp"] = []
+
+# --- Other Free Paste ---
+other_html = st.text_area("Paste any other HTML or text data here", height=100)
+if st.button("Save Other Data"):
+    if other_html:
+        st.session_state.manual_data["other"] = {"raw_html": other_html}
+        st.success("Other data saved.")
+
+# --- 9) Export All Data ---
+if st.button("Export All Data to Excel (including manual HTML)"):
+    yelp_reviews_combined = st.session_state.yelp_reviews_manual + st.session_state.manual_data.get("yelp", [])
+    export_to_excel(
+        org_name_for_api,
+        cms_data=match,
+        google_reviews=google_reviews,
+        yelp_reviews=yelp_reviews_combined,
+        about_data=about_data,
+        other_data=st.session_state.manual_data
+    )
+    st.success("Exported all data (including manual HTML) to Excel successfully!")
