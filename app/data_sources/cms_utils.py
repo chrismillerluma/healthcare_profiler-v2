@@ -1,201 +1,143 @@
 import os
 import io
+import re
 import pandas as pd
 import requests
 import streamlit as st
+import logging
 from config import settings
-from difflib import SequenceMatcher
+
+# -------------------------
+# Setup Logger
+# -------------------------
+logger = logging.getLogger("cms_loader")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+def log_st(msg, level="info", show_in_ui=True):
+    """Log message and optionally show in Streamlit UI"""
+    log_level = "info" if level == "success" else level
+    getattr(logger, log_level)(msg)
+    
+    if show_in_ui:
+        if level == "info":
+            st.info(msg)
+        elif level == "success":
+            st.success(msg)
+        elif level == "error":
+            st.error(msg)
+        else:
+            st.write(msg)
 
 # -------------------------
 # Load CMS General Info
 # -------------------------
 @st.cache_data
-def load_cms_general_info(csv_path=None):
-    """
-    Load CMS general info from URL or backup.
-    If csv_path is provided, load from local CSV instead.
-    """
+def load_cms_general_info(csv_path=None, show_ui_messages=True):
     backup_path = os.path.join(settings.DATA_DIR, "cms_hospitals_backup.csv")
 
-    if csv_path is not None:
+    if csv_path:
         try:
             df = pd.read_csv(csv_path, dtype=str, on_bad_lines="skip")
-            st.success(f"Loaded CMS general info from CSV path ({len(df)} records)")
+            log_st(f"Loaded CMS general info from CSV path ({len(df)} records)", "success", show_ui_messages)
             return df
         except Exception as e:
-            st.error(f"Cannot load CMS general info from {csv_path}: {e}")
+            log_st(f"Cannot load CMS general info from {csv_path}: {e}", "error", show_ui_messages)
             return pd.DataFrame()
 
     try:
         r = requests.get(settings.CMS_GENERAL_URL, timeout=15)
         df = pd.read_csv(io.BytesIO(r.content), dtype=str, on_bad_lines="skip")
-        st.success(f"Loaded CMS general info ({len(df)} records)")
+        log_st(f"Loaded CMS general info ({len(df)} records)", "success", show_ui_messages)
         return df
     except Exception:
         if os.path.exists(backup_path):
             for enc in ["utf-8", "latin1", "utf-16"]:
                 try:
                     df = pd.read_csv(backup_path, dtype=str, encoding=enc, on_bad_lines="skip")
-                    st.success(f"Loaded CMS general info from backup ({enc})")
+                    log_st(f"Loaded CMS general info from backup ({enc})", "success", show_ui_messages)
                     return df
                 except Exception:
                     continue
-        st.error("Cannot load CMS general info.")
+        log_st("Cannot load CMS general info.", "error", show_ui_messages)
         return pd.DataFrame()
 
 # -------------------------
-# Load CMS Patient Survey Data
+# Load CMS Patient Surveys
 # -------------------------
 @st.cache_data
-def load_cms_patient_surveys(csv_path=None):
-    """
-    Load CMS patient surveys from URL or backup.
-    If csv_path is provided, load from local CSV instead.
-    """
+def load_cms_patient_surveys(csv_path=None, show_ui_messages=True):
     backup_path = os.path.join(settings.DATA_DIR, "cms_patient_surveys_backup.csv")
 
-    if csv_path is not None:
+    if csv_path:
         try:
             df = pd.read_csv(csv_path, dtype=str, on_bad_lines="skip")
-            st.success(f"Loaded CMS patient surveys from CSV path ({len(df)} records)")
+            log_st(f"Loaded CMS patient surveys from CSV path ({len(df)} records)", "success", show_ui_messages)
             return df
         except Exception as e:
-            st.error(f"Cannot load CMS patient surveys from {csv_path}: {e}")
+            log_st(f"Cannot load CMS patient surveys from {csv_path}: {e}", "error", show_ui_messages)
             return pd.DataFrame()
 
     try:
         r = requests.get(settings.CMS_SURVEY_URL, timeout=15)
         df = pd.read_csv(io.BytesIO(r.content), dtype=str, on_bad_lines="skip")
-        st.success(f"Loaded CMS patient surveys ({len(df)} records)")
+        log_st(f"Loaded CMS patient surveys ({len(df)} records)", "success", show_ui_messages)
         return df
     except Exception:
         if os.path.exists(backup_path):
             for enc in ["utf-8", "latin1", "utf-16"]:
                 try:
                     df = pd.read_csv(backup_path, dtype=str, encoding=enc, on_bad_lines="skip")
-                    st.success(f"Loaded CMS patient surveys from backup ({enc})")
+                    log_st(f"Loaded CMS patient surveys from backup ({enc})", "success", show_ui_messages)
                     return df
                 except Exception:
                     continue
-        st.error("Cannot load CMS patient surveys.")
+        log_st("Cannot load CMS patient surveys.", "error", show_ui_messages)
         return pd.DataFrame()
 
 # -------------------------
-# Extract Patient Survey Metrics
+# Find CCN Column
 # -------------------------
-def get_patient_survey_metrics(df_survey, hospital_name):
-    """Return dictionary of key patient survey scores for a hospital"""
-    if df_survey.empty:
-        return {}
-    row = df_survey[df_survey['Hospital Name'].str.contains(hospital_name, case=False, na=False)]
-    if row.empty:
-        return {}
-    row = row.iloc[0]
-    metrics = {
-        "HCAHPS_Overall_Rating": row.get("HCAHPS_Overall_Rating"),
-        "Communication_Doctors": row.get("Communication_Doctors"),
-        "Communication_Nurses": row.get("Communication_Nurses"),
-        "Cleanliness": row.get("Cleanliness"),
-        "Pain_Management": row.get("Pain_Management"),
-    }
-    return metrics
+def find_ccn_column(df):
+    """Attempt to identify the CCN column in a CMS DataFrame"""
+    for col in df.columns:
+        if re.search(r'ccn|cms_certification_number', col, re.I):
+            return col
+    return None
 
 # -------------------------
 # Calculate CMS Score
 # -------------------------
 def calculate_cms_score(hospital_row):
     """
-    Compute a CMS score (0–5 scale) from a CMS hospital row.
-    hospital_row: a pandas Series representing a hospital
+    Example scoring function based on available CMS fields.
+    Adjust logic to your scoring rules.
     """
-    if hospital_row is None or hospital_row.empty:
-        return None
-
+    score = 0
     try:
-        scores = []
-        for col in ["HCAHPS_Overall_Rating", "Communication_Doctors", 
-                    "Communication_Nurses", "Cleanliness", "Pain_Management"]:
-            val = hospital_row.get(col)
-            if val is not None:
-                try:
-                    scores.append(float(val))
-                except ValueError:
-                    continue
-        if scores:
-            return round(sum(scores) / len(scores), 2)
-        return None
-    except Exception:
-        return None
+        rating = hospital_row.get("Hospital overall rating")
+        if rating and rating.isdigit():
+            score += int(rating) * 10  # Example multiplier
+        survey_score = hospital_row.get("Patient survey star rating")
+        if survey_score and survey_score.isdigit():
+            score += int(survey_score) * 5
+    except Exception as e:
+        log_st(f"Error calculating CMS score: {e}", "error")
+    return score
 
 # -------------------------
-# Utility: Find CCN Column
+# Fetch HCAHPS by CCN
 # -------------------------
-def find_ccn_column(df):
-    """
-    Identify which column in CMS dataframe contains the CCN (CMS Certification Number)
-    """
-    for col in df.columns:
-        if "CCN" in col.upper() or "CMS Certification Number".upper() in col.upper():
-            return col
+def fetch_hcahps_by_ccn(ccn, patient_survey_df):
+    """Return the survey row for a given CCN"""
+    ccn_col = find_ccn_column(patient_survey_df)
+    if not ccn_col:
+        return None
+    row = patient_survey_df.loc[patient_survey_df[ccn_col] == str(ccn)]
+    if not row.empty:
+        return row.iloc[0].to_dict()
     return None
-
-# -------------------------
-# Placeholder: Fetch HCAHPS by CCN
-# -------------------------
-def fetch_hcahps_by_ccn(ccn):
-    """
-    Fetch CMS HCAHPS patient survey data for a given CCN
-    Placeholder: return empty DataFrame or implement API call
-    """
-    return pd.DataFrame()
-
-# ------------------------
-# Helper
-# ------------------------
-def parse_ccn(ccn: str):
-    """Parse CCN and return state_code and facility_id."""
-    if not ccn:
-        return None, None
-    ccn = str(ccn)
-    if len(ccn) == 10 and ccn[2] == 'C':  # ASC
-        state_code = ccn[:2]
-        facility_id = ccn[-4:]
-    elif len(ccn) == 6:  # regular facility
-        state_code = ccn[:2]
-        facility_id = ccn[-4:]
-    else:
-        state_code = None
-        facility_id = None
-    return state_code, facility_id
-
-# ------------------------
-# New Helpers: Fuzzy Matching (Safe Addition)
-# ------------------------
-def fuzzy_match_name(name1, name2, threshold=0.8):
-    """Return True if two names match approximately."""
-    if not name1 or not name2:
-        return False
-    ratio = SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
-    return ratio >= threshold
-
-def normalize_name(name):
-    """Simple normalization: lowercased, stripped, remove punctuation."""
-    if not name:
-        return ""
-    import re
-    return re.sub(r'[^a-z0-9 ]', '', name.lower().strip())
-
-def match_org(hospital_name, df, name_column='Hospital Name'):
-    """Find best fuzzy match in a dataframe and return the row."""
-    if df.empty or not hospital_name:
-        return None
-    hospital_name_norm = normalize_name(hospital_name)
-    best_ratio = 0
-    best_row = None
-    for _, row in df.iterrows():
-        candidate = normalize_name(str(row.get(name_column, "")))
-        ratio = SequenceMatcher(None, hospital_name_norm, candidate).ratio()
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_row = row
-    return best_row if best_ratio >= 0.8 else None
