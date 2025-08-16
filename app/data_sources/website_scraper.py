@@ -1,13 +1,11 @@
 import requests
 from bs4 import BeautifulSoup
 
-DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-def scrape_about(website_url: str):
+def scrape_about(website_url):
     if not website_url:
         return {}
     try:
-        r = requests.get(website_url, headers=DEFAULT_HEADERS, timeout=10)
+        r = requests.get(website_url, headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
         soup = BeautifulSoup(r.text, "html.parser")
         title = soup.title.string.strip() if soup.title else ""
         meta_desc = ""
