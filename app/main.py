@@ -1,3 +1,6 @@
+import os
+import sys
+from dotenv import load_dotenv
 import json
 import re
 from datetime import datetime
@@ -5,6 +8,10 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# Add parent folder to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Import modules
 from config import settings
 from data_sources.google_utils import google_search_name, match_org, normalize_name
 from data_sources.cms_utils import load_cms_general_info, calculate_cms_score, find_ccn_column, fetch_hcahps_by_ccn
@@ -14,30 +21,40 @@ from data_sources.usnews import fetch_usnews_rankings
 from data_sources.yelp_utils import fetch_yelp_reviews_scrape, fetch_yelp_reviews_api
 from export_utils import export_to_excel
 
-st.set_page_config(page_title="Healthcare Profiler (CMS + Reviews + News + Business Profile)", layout="wide")
+# Load environment variables
+load_dotenv()
+google_api_key = os.getenv("GOOGLE_API_KEY", "")
+yelp_api_key = os.getenv("YELP_API_KEY", "")
+default_location = os.getenv("DEFAULT_YELP_LOCATION", "San Francisco, CA")
+
+# Streamlit page config
+st.set_page_config(
+    page_title="Healthcare Profiler (CMS + Reviews + News + Business Profile)",
+    layout="wide"
+)
 st.title("Healthcare Organization Discovery Profiler — v2.0")
 
-# Cache CMS
+# Input API keys and location
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    gkey = st.text_input("Google Places API Key (optional)", value=google_api_key, type="password", key="google_api_key_input")
+with col2:
+    yelp_key = st.text_input("Yelp API Key (optional)", value=yelp_api_key, type="password", key="yelp_api_key_input")
+with col3:
+    default_loc = st.text_input("Default Location for Yelp (city, state)", value=default_location, key="default_loc_input")
+
+# Cache CMS data
 @st.cache_data
 def load_cms():
-    df = load_cms_general_info(settings.CMS_GENERAL_INFO_CSV)
-    return df
+    return load_cms_general_info(settings.CMS_GENERAL_INFO_CSV)
 
 df_cms = load_cms()
 
-# Inputs
+# Organization input
 org = st.text_input("Organization Name", placeholder="e.g., UCSF Medical Center")
-colA, colB, colC = st.columns([1,1,1])
-with colA:
-    gkey = st.text_input("Google Places API Key (optional)", type="password")
-with colB:
-    yelp_key = st.text_input("Yelp API Key (optional)", type="password")
-with colC:
-    default_loc = st.text_input("Default Location for Yelp (city, state)", value="San Francisco, CA")
-
 search_button = st.button("Search")
 
-# Gate all work behind button
+# Main workflow
 if org and search_button:
     # 1) Pre-validate via Google Search
     with st.spinner("Validating via Google search..."):
@@ -52,7 +69,7 @@ if org and search_button:
         city, state = None, None
         for hit in google_hits or []:
             snippet = hit.get("snippet","")
-            match_loc = re.search(r"\\b([A-Za-z\\s]+),\\s([A-Z]{2})\\b", snippet)
+            match_loc = re.search(r"\b([A-Za-z\s]+),\s([A-Z]{2})\b", snippet)
             if match_loc:
                 city, state = match_loc.group(1), match_loc.group(2)
                 break
@@ -66,23 +83,28 @@ if org and search_button:
         st.error("No match could be found in CMS. Try adjusting the name or adding city/state.")
         st.stop()
 
-    # Facility info
     st.subheader("Facility Info (CMS)")
     st.json(match.to_dict())
 
     # 3) News
+    @st.cache_data
+    def get_news(name):
+        return fetch_news(name, limit=5)
+
     with st.spinner("Fetching Google News..."):
-        news = fetch_news(match.get("Hospital Name") or match[name_col], limit=5)
+        news = get_news(match.get("Hospital Name") or match[name_col])
     st.subheader("Recent News")
     if news:
         for n in news:
-            st.markdown(f"- [{n['title']}]({n['link']}) — {n['date']}")
+            st.markdown(f"- [{n.get('title','No Title')}]({n.get('link','#')}) — {n.get('date','N/A')}")
     else:
         st.info("No recent news found.")
 
-    # 4) Reviews & Business Profile (Google)
-    from bs4 import BeautifulSoup  # for safety in the environment
+    # 4) Reviews & Google Business Profile
+    from bs4 import BeautifulSoup
     import requests
+
+    @st.cache_data
     def fetch_reviews(name, api_key=None, max_reviews=settings.DEFAULT_REVIEW_LIMIT):
         reviews_data = []
         place = {}
@@ -178,7 +200,7 @@ if org and search_button:
             "place_id": place_info.get("place_id")
         })
 
-    # 5) About (site scrape)
+    # 5) About (website scrape)
     about_data = {}
     if place_info:
         with st.spinner("Scraping website for About info..."):
@@ -187,10 +209,9 @@ if org and search_button:
         st.subheader("About (from Website)")
         st.json(about_data)
 
-    # 6) CMS score + Combined
-    from app.data_sources.cms_utils import calculate_cms_score
+    # 6) CMS + Combined Score
     cms_score = calculate_cms_score(match)
-    google_score = place_info.get("rating", None) if place_info else None
+    google_score = place_info.get("rating") if place_info else None
     combined_score = None
     if cms_score and google_score:
         combined_score = round(0.5*float(google_score) + 0.5*float(cms_score), 2)
@@ -205,45 +226,64 @@ if org and search_button:
     else:
         st.info("Insufficient data to compute combined score.")
 
-    # 7) U.S. News
-    with st.spinner("Fetching U.S. News & World Report rankings..."):
-        usnews_data = fetch_usnews_rankings(match.get("Hospital Name") or match[name_col])
+    # --- 7) U.S. News ---
     st.subheader("U.S. News & World Report")
-    if "error" not in usnews_data:
-        st.write(f"**Ranking:** {usnews_data.get('ranking','N/A')}")
-        if usnews_data.get("specialties"):
-            st.write("**Top Specialties:**")
-            for sp in usnews_data["specialties"][:10]:
-                st.write(f"- {sp}")
-    else:
-        st.error(usnews_data["error"])
+    @st.cache_data
+    def get_usnews(name):
+        return fetch_usnews_rankings(name)
 
-    # 8) Yelp
-    with st.spinner("Fetching Yelp reviews..."):
-        if yelp_key:
-            yelp_reviews = fetch_yelp_reviews_api(match.get("Hospital Name") or match[name_col], default_loc, yelp_key, limit=5)
+    try:
+        with st.spinner("Fetching U.S. News & World Report rankings..."):
+            usnews_data = get_usnews(match.get("Hospital Name") or match[name_col])
+        if usnews_data and "error" not in usnews_data:
+            st.write(f"**Ranking:** {usnews_data.get('ranking','N/A')}")
+            if usnews_data.get("specialties"):
+                st.write("**Top Specialties:**")
+                for sp in usnews_data["specialties"][:10]:
+                    st.write(f"- {sp}")
         else:
-            yelp_reviews = fetch_yelp_reviews_scrape(match.get("Hospital Name") or match[name_col], location=default_loc, limit=5)
-    st.subheader("Yelp Reviews (sample)")
-    if yelp_reviews:
-        for y in yelp_reviews:
-            st.write(f"- {y}")
-    else:
-        st.info("No Yelp reviews found.")
+            st.info("U.S. News data not available for this facility at this time.")
+    except Exception as e:
+        st.info(f"U.S. News data not available: {e}")
 
-    # 9) CMS HCAHPS (best-effort)
+    # --- 8) Yelp Reviews ---
+    st.subheader("Yelp Reviews (sample)")
+    @st.cache_data
+    def get_yelp(name, location, key=None):
+        if key:
+            return fetch_yelp_reviews_api(name, location, key, limit=5)
+        else:
+            return fetch_yelp_reviews_scrape(name, location=location, limit=5)
+
+    with st.spinner("Fetching Yelp reviews..."):
+        try:
+            yelp_reviews = get_yelp(match.get("Hospital Name") or match[name_col], default_loc, yelp_key)
+            if yelp_reviews:
+                for y in yelp_reviews:
+                    st.write(f"- {y}")
+            else:
+                st.info("No Yelp reviews found or API key missing.")
+        except Exception as e:
+            st.info(f"Yelp reviews not available: {e}")
+
+    # --- 9) CMS HCAHPS ---
+    st.subheader("CMS Patient Survey (HCAHPS)")
     ccn_col = find_ccn_column(df_cms)
     hcahps_df = None
     if ccn_col and (ccn := match.get(ccn_col)):
-        with st.spinner("Fetching CMS Patient Survey (HCAHPS) data..."):
-            hcahps_df = fetch_hcahps_by_ccn(ccn)
-    st.subheader("CMS Patient Survey (HCAHPS)")
-    if hcahps_df is not None and not hcahps_df.empty:
-        st.dataframe(hcahps_df.head(50))
+        try:
+            with st.spinner("Fetching CMS Patient Survey (HCAHPS) data..."):
+                hcahps_df = fetch_hcahps_by_ccn(ccn)
+            if hcahps_df is not None and not hcahps_df.empty:
+                st.dataframe(hcahps_df.head(50))
+            else:
+                st.info("HCAHPS data not available via API for this facility.")
+        except Exception as e:
+            st.info(f"HCAHPS data not available: {e}")
     else:
-        st.info("HCAHPS data not available via API for this facility.")
+        st.info("No CCN found in CMS data; cannot fetch HCAHPS.")
 
-    # 10) Export
+    # --- 10) Export ---
     st.subheader("Download")
     excel_data = export_to_excel(
         match=match,

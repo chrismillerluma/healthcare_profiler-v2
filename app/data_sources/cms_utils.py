@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from config import settings
+from difflib import SequenceMatcher
 
 # -------------------------
 # Load CMS General Info
@@ -16,7 +17,6 @@ def load_cms_general_info(csv_path=None):
     """
     backup_path = os.path.join(settings.DATA_DIR, "cms_hospitals_backup.csv")
 
-    # Use CSV path if provided
     if csv_path is not None:
         try:
             df = pd.read_csv(csv_path, dtype=str, on_bad_lines="skip")
@@ -26,7 +26,6 @@ def load_cms_general_info(csv_path=None):
             st.error(f"Cannot load CMS general info from {csv_path}: {e}")
             return pd.DataFrame()
 
-    # Otherwise try URL
     try:
         r = requests.get(settings.CMS_GENERAL_URL, timeout=15)
         df = pd.read_csv(io.BytesIO(r.content), dtype=str, on_bad_lines="skip")
@@ -149,3 +148,54 @@ def fetch_hcahps_by_ccn(ccn):
     Placeholder: return empty DataFrame or implement API call
     """
     return pd.DataFrame()
+
+# ------------------------
+# Helper
+# ------------------------
+def parse_ccn(ccn: str):
+    """Parse CCN and return state_code and facility_id."""
+    if not ccn:
+        return None, None
+    ccn = str(ccn)
+    if len(ccn) == 10 and ccn[2] == 'C':  # ASC
+        state_code = ccn[:2]
+        facility_id = ccn[-4:]
+    elif len(ccn) == 6:  # regular facility
+        state_code = ccn[:2]
+        facility_id = ccn[-4:]
+    else:
+        state_code = None
+        facility_id = None
+    return state_code, facility_id
+
+# ------------------------
+# New Helpers: Fuzzy Matching (Safe Addition)
+# ------------------------
+def fuzzy_match_name(name1, name2, threshold=0.8):
+    """Return True if two names match approximately."""
+    if not name1 or not name2:
+        return False
+    ratio = SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
+    return ratio >= threshold
+
+def normalize_name(name):
+    """Simple normalization: lowercased, stripped, remove punctuation."""
+    if not name:
+        return ""
+    import re
+    return re.sub(r'[^a-z0-9 ]', '', name.lower().strip())
+
+def match_org(hospital_name, df, name_column='Hospital Name'):
+    """Find best fuzzy match in a dataframe and return the row."""
+    if df.empty or not hospital_name:
+        return None
+    hospital_name_norm = normalize_name(hospital_name)
+    best_ratio = 0
+    best_row = None
+    for _, row in df.iterrows():
+        candidate = normalize_name(str(row.get(name_column, "")))
+        ratio = SequenceMatcher(None, hospital_name_norm, candidate).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_row = row
+    return best_row if best_ratio >= 0.8 else None
