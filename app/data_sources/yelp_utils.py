@@ -1,42 +1,80 @@
+# yelp_utils.py
 import requests
-from bs4 import BeautifulSoup
+import logging
+from rapidfuzz import fuzz, process
 
-DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0"}
+logger = logging.getLogger(__name__)
 
-def fetch_yelp_reviews_scrape(hospital_name: str, location: str = "", limit: int = 5):
-    """Best-effort HTML scraping fallback when no Yelp API key is provided."""
-    q = f"{hospital_name} {location} reviews".strip().replace(" ", "+")
-    url = f"https://www.yelp.com/search?find_desc={q}"
-    try:
-        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        reviews = []
-        # Yelp DOM changes often; this is a heuristic selector
-        for review in soup.find_all("p"):
-            txt = review.get_text(" ", strip=True)
-            if txt and len(txt) > 40:
-                reviews.append(txt)
-                if len(reviews) >= limit:
-                    break
-        return reviews
-    except Exception as e:
-        return [f"Failed to fetch Yelp reviews: {e}"]
+YELP_SEARCH_URL = "https://api.yelp.com/v3/businesses/search"
+YELP_REVIEWS_URL = "https://api.yelp.com/v3/businesses/{id}/reviews"
 
-def fetch_yelp_reviews_api(hospital_name: str, location: str, api_key: str, limit: int = 5):
-    """Yelp Fusion API (requires API key)."""
+# -------------------------
+# Fetch Yelp Reviews via API
+# -------------------------
+def fetch_yelp_reviews_api(name, city, api_key, limit=5):
+    """
+    Query Yelp API for business by name + city, then fetch reviews.
+    Uses fuzzy matching to pick the closest business name.
+    """
     try:
         headers = {"Authorization": f"Bearer {api_key}"}
-        params = {"term": hospital_name, "location": location, "limit": 1}
-        srch = requests.get("https://api.yelp.com/v3/businesses/search", headers=headers, params=params, timeout=15)
-        srchj = srch.json()
-        if not srchj.get("businesses"):
+        params = {
+            "term": name,
+            "location": city if city else "United States",
+            "limit": 10  # get a batch to fuzzy match
+        }
+        resp = requests.get(YELP_SEARCH_URL, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        businesses = resp.json().get("businesses", [])
+
+        if not businesses:
+            logger.warning(f"No businesses found for {name}, {city}")
             return []
-        biz_id = srchj["businesses"][0]["id"]
-        rev = requests.get(f"https://api.yelp.com/v3/businesses/{biz_id}/reviews", headers=headers, timeout=15)
-        items = rev.json().get("reviews", [])
-        out = []
-        for it in items[:limit]:
-            out.append(f"{it.get('rating','?')}★ — {it.get('user',{}).get('name','Anon')}: {it.get('text','')}")
-        return out
+
+        # Fuzzy match CMS hospital name to Yelp results
+        candidates = [(biz["name"], biz) for biz in businesses]
+        best_match = process.extractOne(
+            name,
+            [c[0] for c in candidates],
+            scorer=fuzz.token_sort_ratio
+        )
+
+        if not best_match:
+            logger.warning(f"No fuzzy match found for {name}, {city}")
+            return []
+
+        _, score, idx = best_match
+        best = candidates[idx][1]
+
+        biz_id = best["id"]
+
+        # Fetch reviews for best match
+        reviews_resp = requests.get(YELP_REVIEWS_URL.format(id=biz_id), headers=headers, timeout=10)
+        reviews_resp.raise_for_status()
+        reviews = reviews_resp.json().get("reviews", [])
+
+        results = []
+        for r in reviews[:limit]:
+            results.append({
+                "name": best.get("name"),
+                "location": ", ".join(best.get("location", {}).get("display_address", [])),
+                "rating": r.get("rating"),
+                "review_text": r.get("text"),
+                "url": r.get("url"),
+            })
+        return results
+
     except Exception as e:
-        return [f"Failed Yelp API: {e}"]
+        logger.error(f"Yelp API error for {name}, {city}: {e}")
+        return []
+
+# -------------------------
+# Fallback Scraper (if no API key)
+# -------------------------
+def fetch_yelp_reviews_scrape(name, location=None, limit=3):
+    """
+    Placeholder scraper logic — currently just returns empty list.
+    You can expand later if needed.
+    """
+    logger.info(f"Scraper fallback not implemented for {name}, {location}")
+    return []

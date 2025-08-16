@@ -20,6 +20,8 @@ from data_sources.website_scraper import scrape_about
 from data_sources.usnews import fetch_usnews_rankings
 from data_sources.yelp_utils import fetch_yelp_reviews_scrape, fetch_yelp_reviews_api
 from export_utils import export_to_excel
+from rapidfuzz import fuzz
+from datetime import timezone
 
 # Load environment variables
 load_dotenv()
@@ -246,25 +248,38 @@ if org and search_button:
     except Exception as e:
         st.info(f"U.S. News data not available: {e}")
 
-    # --- 8) Yelp Reviews ---
-    st.subheader("Yelp Reviews (sample)")
-    @st.cache_data
-    def get_yelp(name, location, key=None):
-        if key:
-            return fetch_yelp_reviews_api(name, location, key, limit=5)
-        else:
-            return fetch_yelp_reviews_scrape(name, location=location, limit=5)
+# --- 8) Yelp Reviews ---
+st.subheader("Yelp Reviews (sample)")
 
-    with st.spinner("Fetching Yelp reviews..."):
-        try:
-            yelp_reviews = get_yelp(match.get("Hospital Name") or match[name_col], default_loc, yelp_key)
-            if yelp_reviews:
-                for y in yelp_reviews:
-                    st.write(f"- {y}")
-            else:
-                st.info("No Yelp reviews found or API key missing.")
-        except Exception as e:
-            st.info(f"Yelp reviews not available: {e}")
+@st.cache_data
+def get_yelp(name, city=None, key=None):
+    """
+    Fetch Yelp reviews, preferring API if key is present, otherwise fallback to scraper.
+    """
+    if key:
+        # Use CMS hospital name + city for better match
+        return fetch_yelp_reviews_api(name, city, key, limit=5)
+    else:
+        return fetch_yelp_reviews_scrape(name, location=city, limit=5)
+
+if org and search_button:
+    try:
+        cms_name = match.get("Hospital Name") if match is not None else org
+        cms_city = match.get("City") if match is not None else default_loc
+
+        with st.spinner("Fetching Yelp reviews..."):
+            yelp_reviews = get_yelp(cms_name, city=cms_city, key=yelp_key)
+
+        if yelp_reviews:
+            for r in yelp_reviews:
+                st.markdown(f"**{r.get('name','Unknown')}** ({r.get('location','N/A')}) ⭐ {r.get('rating','N/A')}")
+                if r.get("review_text"):
+                    st.caption(r["review_text"])
+                st.markdown("---")
+        else:
+            st.info("No Yelp reviews found for this facility.")
+    except Exception as e:
+        st.info(f"Yelp reviews not available: {e}")
 
     # --- 9) CMS HCAHPS ---
     st.subheader("CMS Patient Survey (HCAHPS)")
