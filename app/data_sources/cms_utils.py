@@ -70,3 +70,31 @@ def get_patient_survey_metrics(df_survey, hospital_name):
         "Pain_Management": row.get("Pain_Management"),
     }
     return metrics
+    
+# -------------------------
+# Calculate CMS Score
+# -------------------------
+def calculate_cms_score(hospital_row):
+    """
+    Compute a CMS score (0–5 scale) from a CMS hospital row.
+    hospital_row: a pandas Series representing a hospital
+    """
+    if hospital_row is None or hospital_row.empty:
+        return None
+
+    # Example: average a few numeric fields if they exist
+    try:
+        scores = []
+        for col in ["HCAHPS_Overall_Rating", "Communication_Doctors", 
+                    "Communication_Nurses", "Cleanliness", "Pain_Management"]:
+            val = hospital_row.get(col)
+            if val is not None:
+                try:
+                    scores.append(float(val))
+                except ValueError:
+                    continue
+        if scores:
+            return round(sum(scores) / len(scores), 2)
+        return None
+    except Exception:
+        return None
