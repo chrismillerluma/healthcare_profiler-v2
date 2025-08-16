@@ -6,13 +6,13 @@ import pandas as pd
 import streamlit as st
 
 from config import settings
-from app.data_sources.google_utils import google_search_name, match_org, normalize_name
-from app.data_sources.cms_utils import load_cms_general_info, calculate_cms_score, find_ccn_column, fetch_hcahps_by_ccn
-from app.data_sources.news_utils import fetch_news
-from app.data_sources.website_scraper import scrape_about
-from app.data_sources.usnews import fetch_usnews_rankings
-from app.data_sources.yelp_utils import fetch_yelp_reviews_scrape, fetch_yelp_reviews_api
-from app.export_utils import export_to_excel
+from .data_sources.google_utils import google_search_name, match_org, normalize_name
+from .data_sources.cms_utils import load_cms_general_info, calculate_cms_score, find_ccn_column, fetch_hcahps_by_ccn
+from .data_sources.news_utils import fetch_news
+from .data_sources.website_scraper import scrape_about
+from .data_sources.usnews import fetch_usnews_rankings
+from .data_sources.yelp_utils import fetch_yelp_reviews_scrape, fetch_yelp_reviews_api
+from .export_utils import export_to_excel
 
 st.set_page_config(page_title="Healthcare Profiler (CMS + Reviews + News + Business Profile)", layout="wide")
 st.title("Healthcare Organization Discovery Profiler — v2.0")
