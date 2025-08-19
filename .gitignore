@@ -8,3 +8,5 @@ __pycache__/
 # Ignore other temporary files
 *.log
 .DS_Store
+.BU of v2 script.py
+.backupV2withmanualbuttons.py
