@@ -34,7 +34,7 @@ st.set_page_config(
     page_title="Healthcare Profiler (CMS + Reviews + News + Business Profile)",
     layout="wide"
 )
-st.title("Healthcare Organization Discovery Profiler — v2.0")
+st.title("Healthcare Org Discovery Profiler — v2.0")
 
 # Input API keys and location
 col1, col2 = st.columns([1,1])
